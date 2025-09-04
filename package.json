@@ -1,17 +1,22 @@
 {
   "name": "api-osint",
   "version": "1.0.0",
-  "main": "index.js",
+  "type": "module",
+  "description": "OSINT / NIK Parser API (Express, ESM, Vercel)",
+  "main": "src/server.js",
+  "engines": { "node": ">=20" },
   "scripts": {
-    "start": "nodemon --ignore session/ src/index.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "dev": "nodemon --ignore session/ src/server.js",
+    "start": "node src/server.js",
+    "vercel-build": "echo \"no build step\""
   },
-  "author": "",
-  "license": "ISC",
-  "description": "",
   "dependencies": {
+    "cors": "^2.8.5",
     "dotenv": "^17.2.2",
     "express": "^5.1.0",
+    "helmet": "^7.1.0"
+  },
+  "devDependencies": {
     "nodemon": "^3.1.10"
   }
 }

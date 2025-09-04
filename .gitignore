@@ -40,5 +40,5 @@ ecosystem.config.cjs
 *.sql
 *.sh
 *.conf
-*.md
 backup
+.vercel
