@@ -53,8 +53,6 @@ cd nama-repo
 ### 2. Install dependencies
 
 ```bash
-pnpm install
-# atau
 npm install
 ```
 
@@ -72,8 +70,6 @@ KPU_TOKEN=ISI_TOKEN_VALID_DARI_KPU
 ### 4. Run server
 
 ```bash
-pnpm start
-# atau
 npm run start
 ```
 
