@@ -1,96 +1,102 @@
 // src/lib/fetchKpu.js
+import axios from "axios";
+
 const API_URL = "https://cekdptonline.kpu.go.id/v2";
 
-// Cache in-memory (serverless tidak persisten, tapi mengurangi spam antar-cold start)
+// Cache in-memory (serverless tidak persisten antar-cold start)
 const CACHE = new Map();
 const TTL = 5 * 60 * 1000; // 5 menit
 
-function setCache(key, value) {
-  CACHE.set(key, { value, exp: Date.now() + TTL });
-}
-function getCache(key) {
-  const it = CACHE.get(key);
+const setCache = (k, v) => CACHE.set(k, { v, exp: Date.now() + TTL });
+const getCache = (k) => {
+  const it = CACHE.get(k);
   if (!it) return null;
-  if (Date.now() > it.exp) { CACHE.delete(key); return null; }
-  return it.value;
-}
+  if (Date.now() > it.exp) { CACHE.delete(k); return null; }
+  return it.v;
+};
 
-function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-// buat satu attempt fetch (tanpa/ dengan Origin/Referer), pure Promise
-function attemptFetch({ body, timeoutMs, useOriginHeaders }) {
-  const ac = new AbortController();
-
+/**
+ * Satu attempt panggilan ke KPU pakai axios
+ * @param {{ body: any, perAttemptTimeout: number, useOriginHeaders: boolean }}
+ * @returns {Promise<{ok:boolean, data?:any, error?:string}>}
+ */
+function attemptAxios({ body, perAttemptTimeout, useOriginHeaders }) {
   const headers = {
     "Content-Type": "application/json",
     "Accept": "application/json",
     "Accept-Language": "id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7",
     "User-Agent":
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
   };
   if (useOriginHeaders) {
     headers["Origin"] = "https://cekdptonline.kpu.go.id";
     headers["Referer"] = "https://cekdptonline.kpu.go.id";
   }
 
-  const fetchPromise =
-    fetch(API_URL, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(body),
-      signal: ac.signal
-    })
+  // axios timeout = keseluruhan request (ms)
+  const req = axios.post(API_URL, body, {
+    headers,
+    timeout: perAttemptTimeout,
+    // Lempar error untuk non-2xx
+    validateStatus: (s) => s >= 200 && s < 300,
+    responseType: "text", // baca mentah dulu biar bisa deteksi HTML block
+    transitional: { clarifyTimeoutError: true },
+  });
+
+  // Hard-timeout ekstra via Promise.race (jaga-jaga)
+  const hardCap = new Promise((_, reject) => {
+    const t = setTimeout(() => reject(new Error("timeout")), perAttemptTimeout + 100);
+    req.finally(() => clearTimeout(t));
+  });
+
+  return Promise.race([req, hardCap])
     .then(resp => {
-      if (!resp.ok) {
-        // Ambil sedikit isi untuk konteks
-        return resp.text().catch(() => "").then(text => {
-          const snippet = (text || "").slice(0, 300).replace(/\s+/g, " ");
-          const err = new Error(`HTTP ${resp.status}${snippet ? `: ${snippet}` : ""}`);
-          throw err;
-        });
-      }
-      // Baca sebagai text dulu supaya bisa deteksi HTML block
-      return resp.text();
-    })
-    .then(raw => {
-      if (typeof raw === "string" && raw.trim().startsWith("<")) {
-        throw new Error("HTML response (possibly blocked)");
+      const raw = typeof resp.data === "string" ? resp.data : JSON.stringify(resp.data || {});
+      if (raw.trim().startsWith("<")) {
+        const err = new Error("HTML response (possibly blocked)");
+        err.code = "HTML_BLOCK";
+        throw err;
       }
       let json;
-      try { json = typeof raw === "string" ? JSON.parse(raw) : raw; }
+      try { json = typeof resp.data === "string" ? JSON.parse(resp.data) : resp.data; }
       catch { throw new Error("Invalid JSON from server"); }
 
       const result = json?.data?.findNikSidalih ?? null;
       if (!result) return { ok: false, error: "Not found" };
 
-      const google_maps_url =
-        result.lat && result.lon ? `https://maps.google.com?q=${result.lat},${result.lon}` : null;
+      const google_maps_url = (result.lat && result.lon)
+        ? `https://maps.google.com?q=${result.lat},${result.lon}`
+        : null;
 
       return { ok: true, data: { ...result, google_maps_url } };
+    })
+    .catch(err => {
+      // Logging ringkas (tanpa token)
+      if (axios.isAxiosError(err)) {
+        const status = err.response?.status;
+        const snippet = (typeof err.response?.data === "string" ? err.response.data : JSON.stringify(err.response?.data || ""))
+          .slice(0, 300).replace(/\s+/g, " ");
+        console.warn("[fetchKpu][axios]", {
+          status,
+          code: err.code,
+          message: err.message,
+          snippet
+        });
+        return { ok: false, error: status ? `HTTP ${status}${snippet ? `: ${snippet}` : ""}` : (err.code || err.message || "fetch failed") };
+      } else {
+        console.warn("[fetchKpu][error]", { message: err?.message || String(err) });
+        return { ok: false, error: err?.message || "fetch failed" };
+      }
     });
-
-  // Hard timeout dengan Promise.race
-  const timeoutPromise = new Promise((_, reject) => {
-    const t = setTimeout(() => {
-      try { ac.abort(); } catch {}
-      reject(new Error("timeout"));
-    }, timeoutMs);
-    // cleanup ketika fetch selesai
-    fetchPromise.finally(() => clearTimeout(t));
-  });
-
-  return Promise.race([fetchPromise, timeoutPromise]);
 }
 
 /**
- * Ambil data dari KPU (Promise-style, tanpa async/await)
- * - Coba TANPA Origin/Referer dulu
- * - Jika 403/405/HTML → retry sekali DENGAN Origin/Referer
- * - Punya hard-timeout per attempt
- *
+ * Ambil data KPU (Axios) dengan retry + hard-timeout + cache (ESM)
  * @param {string} nik
- * @param {{token?: string, timeoutMs?: number}} [opt]
- * @returns {Promise<{ok: boolean, data?: object, error?: string}>}
+ * @param {{ token?: string, timeoutMs?: number }} [opt]
+ * @returns {Promise<{ok:boolean, data?:any, error?:string}>}
  */
 export default function fetchKpu(
   nik,
@@ -118,29 +124,27 @@ export default function fetchKpu(
   };
 
   // Attempt 1: tanpa Origin/Referer
-  return attemptFetch({ body, timeoutMs, useOriginHeaders: false })
+  return attemptAxios({ body, perAttemptTimeout: timeoutMs - 100, useOriginHeaders: false })
     .then(out => {
       setCache(cacheKey, out);
       return out;
     })
     .catch(e1 => {
-      const msg = String(e1 && e1.message || "");
-      // Hanya retry kalau indikasi diblok/di-restrict
-      if (/^timeout$|HTML response|HTTP 403|HTTP 405/i.test(msg)) {
-        // jitter pendek sebelum retry
+      const m = String(e1?.error || e1?.message || "");
+      // Retry hanya kalau indikasi diblok/timeout
+      if (/^timeout$|HTML response|HTML_BLOCK|HTTP 403|HTTP 405/i.test(m)) {
         return sleep(200 + Math.floor(Math.random() * 200))
-          .then(() => attemptFetch({ body, timeoutMs, useOriginHeaders: true }))
+          .then(() => attemptAxios({ body, perAttemptTimeout: timeoutMs - 100, useOriginHeaders: true }))
           .then(out2 => {
             setCache(cacheKey, out2);
             return out2;
           })
           .catch(e2 => {
-            const err = (e2 && e2.name === "AbortError") ? "timeout" : (e2 && e2.message) || "fetch failed";
-            return { ok: false, error: err };
+            const errMsg = e2?.error || e2?.message || "fetch failed";
+            return { ok: false, error: errMsg };
           });
       }
-      // error lain: langsung propagate hasil gagal standar
-      const err = (e1 && e1.name === "AbortError") ? "timeout" : (e1 && e1.message) || "fetch failed";
-      return { ok: false, error: err };
+      const errMsg = e1?.error || e1?.message || "fetch failed";
+      return { ok: false, error: errMsg };
     });
 }

@@ -4,13 +4,16 @@
   "type": "module",
   "description": "OSINT / NIK Parser API (Express, ESM, Vercel)",
   "main": "src/server.js",
-  "engines": { "node": ">=20" },
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "dev": "nodemon --ignore session/ src/server.js",
     "start": "node src/server.js",
     "vercel-build": "echo \"no build step\""
   },
   "dependencies": {
+    "axios": "^1.11.0",
     "cors": "^2.8.5",
     "dotenv": "^17.2.2",
     "express": "^5.1.0",
