@@ -79,24 +79,38 @@ export default async function cekNik(req, res) {
 
   const { usia, ultah } = usiaDanUltah(dd, mm, yyyy);
 
-  // --- KPU: normalisasi supaya selalu object ---
+  // --- KPU: fetch dengan hard-timeout pakai Promise.race ---
+  const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+  const KPU_HARD_CAP_MS = Number(process.env.KPU_TIMEOUT_MS || (process.env.VERCEL ? 2500 : 6000));
+
   let kpuRaw;
   try {
-    kpuRaw = await fetchKpu(nik); // { ok:true, data:{...} } atau {ok:false,...}
+    kpuRaw = await Promise.race([
+      fetchKpu(nik, {
+        token: process.env.KPU_TOKEN,
+        timeoutMs: Math.max(1200, KPU_HARD_CAP_MS - 200),
+      }),
+      sleep(KPU_HARD_CAP_MS).then(() => ({ ok: false, error: "timeout-local" }))
+    ]);
   } catch (e) {
     kpuRaw = { ok: false, error: e?.message || "fetch error" };
   }
-  const kpu = (kpuRaw && typeof kpuRaw === "object" && "ok" in kpuRaw) ? kpuRaw : { ok: false, error: "unavailable" };
+  const kpu = (kpuRaw && typeof kpuRaw === "object" && "ok" in kpuRaw)
+    ? kpuRaw
+    : { ok: false, error: "unavailable" };
 
-  // Build payload — ambil nama dari KPU (sesuai permintaanmu)
+  if (!kpu.ok) {
+    console.warn("[KPU][fail]", { nik, error: String(kpu.error).slice(0, 160) });
+  }
+
   const payload = {
     nik,
-    nama: kpu.ok ? (kpu.data?.nama ?? null) : null,   // << ambil dari KPU
+    nama: kpu.ok ? (kpu.data?.nama ?? null) : null,
     kelamin,
     lahir: `${dd}/${mm}/${yyyy}`,
-    provinsi: prov,            // pakai mapping lokal (KPU kamu kadang null)
-    kotakab: kab,              // pakai mapping lokal
-    kecamatan: KEC,            // pakai mapping lokal
+    provinsi: prov,
+    kotakab: kab,
+    kecamatan: KEC,
     uniqcode: nik.substring(12, 16),
     tambahan: {
       kodepos: KODEPOS,
@@ -105,7 +119,6 @@ export default async function cekNik(req, res) {
       ultah: `${ultah} Lagi`,
       zodiak: zodiak(dd, mm)
     },
-    // simpan data KPU raw (tanpa token), termasuk url gmaps
     kpu: kpu.ok ? {
       ok: true,
       data: {
